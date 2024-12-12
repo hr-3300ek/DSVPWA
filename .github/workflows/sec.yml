@@ -1,0 +1,174 @@
+name: Security Checks
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: write
+  pull-requests: write
+  security-events: write
+  actions: read
+
+jobs:
+  semgrep:
+    runs-on: ubuntu-latest
+    container:
+      image: returntocorp/semgrep:latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          token: ${{ github.token }}
+
+      - name: Create reports directory
+        run: mkdir -p reports
+
+      - name: Semgrep Security Scan with Autofix
+        run: |
+          semgrep scan \
+            --config "p/python" \
+            --config "p/secrets" \
+            --config "p/owasp-top-ten" \
+            --output reports/semgrep-results.sarif \
+            --sarif \
+            --autofix || true
+
+      - name: Upload SARIF file
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: reports/semgrep-results.sarif
+
+      - name: Upload Semgrep Results
+        uses: actions/upload-artifact@v3
+        with:
+          name: semgrep-results
+          path: reports/semgrep-results.sarif
+          retention-days: 14
+
+      - name: Create Pull Request with fixes
+        uses: peter-evans/create-pull-request@v5
+        with:
+          token: ${{ github.token }}
+          commit-message: 'fix: auto-fixes from semgrep'
+          title: 'Semgrep Auto-fixes'
+          body: |
+            Автоматические исправления от Semgrep security scan
+            
+            Этот PR содержит автоматические исправления проблем безопасности, найденных Semgrep.
+            Пожалуйста, проверьте изменения перед merge.
+          branch: semgrep-fixes
+          base: main
+          delete-branch: true
+
+  zap_scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v3
+
+      - name: Run App
+        id: app
+        run: |
+          python dsvpwa.py --risk 3 > app.log 2>&1 &
+
+      - name: Prepare ZAP Environment
+        run: |
+          sudo mkdir -p /zap/wrk
+          sudo chown -R $USER:$USER /zap
+          sudo chmod -R 755 /zap
+
+      - name: ZAP Scan
+        uses: zaproxy/action-baseline@v0.9.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          docker_name: 'ghcr.io/zaproxy/zaproxy:stable'
+          target: 'http://localhost:65413/'
+          cmd_options: '-I'
+          rules_file_name: '.zap/rules.tsv'
+          allow_issue_writing: false
+          fail_action: false
+
+      - name: Upload App Logs
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: app-log
+          path: app.log
+          retention-days: 5
+
+      - name: Upload ZAP Results
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: zap-results
+          path: |
+            zap-*
+            *.html
+          retention-days: 5
+  
+  dependency_check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Create reports directory
+        run: mkdir -p reports
+
+      - name: Depcheck
+        uses: dependency-check/Dependency-Check_Action@main
+        id: Depcheck
+        with:
+          project: 'test'
+          path: '.'
+          format: 'HTML'
+          out: 'reports' # this is the default, no need to specify unless you wish to override it
+
+      - name: Upload Dependency Check Results
+        uses: actions/upload-artifact@v3
+        with:
+          name: dependency-check-results
+          path: reports/dependency-check-report.html
+          retention-days: 14
+
+  publish_security_reports:
+    needs: [semgrep, zap_scan, dependency_check]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create reports directory
+        run: mkdir -p combined-reports
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v3
+        with:
+          path: combined-reports
+
+      - name: Prepare reports
+        run: |
+          cd combined-reports
+          find . -type f -exec mv {} ./ \;
+          rm -rf */
+
+      - name: Archive Security Results
+        uses: actions/upload-artifact@v3
+        with:
+          name: security-reports-bundle
+          path: combined-reports/*
+          retention-days: 14
+
+  cleanup:
+    needs: publish_security_reports
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Remove temporary artifacts
+        uses: geekyeggo/delete-artifact@v2
+        with:
+          name: |
+            semgrep-results
+            zap-results
+            dependency-check-results
+            app-log
