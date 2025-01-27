@@ -134,8 +134,43 @@ jobs:
           path: reports/dependency-check-report.html
           retention-days: 14
 
+  ffuf:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v3
+
+      - name: Run App
+        id: app
+        run: |
+          python dsvpwa.py --risk 3 > app.log 2>&1 &
+
+      - name: Create report directory
+        run: mkdir -p reports
+
+      - name: get wordlist
+        run: wget https://raw.githubusercontent.com/six2dez/OneListForAll/refs/heads/main/onelistforallshort.txt
+
+      - name: get ffuf
+        run: |
+          wget https://github.com/ffuf/ffuf/releases/download/v2.1.0/ffuf_2.1.0_linux_amd64.tar.gz -O ffuf.tgz
+          tar -xf ./ffuf.tgz
+
+      - name: fuzz via ffuf
+        run: |
+          ./ffuf -w onelistforallshort.txt -u http://127.0.0.1:65413/FUZZ -of html -o reports/ffuf.html -mc 200
+
+      - name: Upload ffuf Check Results
+        uses: actions/upload-artifact@v3
+        with:
+          name: dependency-check-results
+          path: reports/ffuf.html
+          retention-days: 14
+
   publish_security_reports:
-    needs: [semgrep, zap_scan, dependency_check]
+    needs: [semgrep, zap_scan, dependency_check, ffuf]
     runs-on: ubuntu-latest
     steps:
       - name: Create reports directory
